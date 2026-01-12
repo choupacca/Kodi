@@ -1,3 +1,10 @@
+v1.2.0
+- Fix compatibility with Kodi 21+
+- Replace deprecated xbmc.translatePath() with xbmcvfs.translatePath()
+- Fix string comparison using 'is' operator instead of '=='
+- Fix cache_id handling that incorrectly created a list instead of a filtered string
+- Add proper bytes/string encoding/decoding for cache file operations
+
 v1.1.0
 - Update to python3
 

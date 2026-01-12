@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 
-import xbmc, xbmcgui, xbmcplugin, xbmcaddon
+import xbmc, xbmcgui, xbmcplugin, xbmcaddon, xbmcvfs
 import urllib.request, urllib.parse, urllib.error, os, sys
 import datetime as dt
 import resources.lib.localization as l
@@ -13,7 +13,7 @@ try:
 except:
     pass
 
-__version__ = '1.1.0'
+__version__ = '1.2.0'
 __settings__ = xbmcaddon.Addon(id='plugin.video.soap4.me')
 
 DEBUG = False
@@ -49,9 +49,9 @@ addon_name      = __addon__.getAddonInfo('name')
 addon_version = __addon__.getAddonInfo('version')
 addon_profile = __addon__.getAddonInfo('profile')
 
-icon   = xbmc.translatePath(addon_icon)
-fanart = xbmc.translatePath(addon_fanart)
-profile = xbmc.translatePath(addon_profile)
+icon   = xbmcvfs.translatePath(addon_icon)
+fanart = xbmcvfs.translatePath(addon_fanart)
+profile = xbmcvfs.translatePath(addon_profile)
 
 if getattr(xbmcgui.Dialog, 'notification', False):
     def message_ok(message):
@@ -188,7 +188,7 @@ class SoapVideo(object):
     def get_pos(self):
         pos = self.cache.get("pos_{0}".format(self.eid), use_lifetime=False)
 
-        if pos is False or pos is "":
+        if pos is False or pos == "":
             pos = 0
         try:
             pos = max(float(pos), float(self.start_from))
@@ -283,8 +283,8 @@ class SoapCache(object):
         self.lifetime = lifetime
 
     def get(self, cache_id, use_lifetime=True):
-        cache_id = [c for c in cache_id if c not in ",./"]
-        filename = os.path.join(self.path, str(cache_id))
+        cache_id = "".join(c for c in cache_id if c not in ",./")
+        filename = os.path.join(self.path, cache_id)
         if not os.path.exists(filename) or not os.path.isfile(filename):
             return False
 
@@ -293,17 +293,22 @@ class SoapCache(object):
             return False
 
         with open(filename, "rb") as f:
-            return f.read()
+            data = f.read()
+            if isinstance(data, bytes):
+                data = data.decode('utf-8')
+            return data
 
     def set(self, cache_id, text):
-        cache_id = [c for c in cache_id if c not in ",./"]
-        filename = os.path.join(self.path, str(cache_id))
+        cache_id = "".join(c for c in cache_id if c not in ",./")
+        filename = os.path.join(self.path, cache_id)
         with open(filename, "wb") as f:
+            if isinstance(text, str):
+                text = text.encode('utf-8')
             f.write(text)
 
     def rm(self, cache_id):
-        cache_id = [c for c in cache_id if c not in ",./"]
-        filename = os.path.join(self.path, str(cache_id))
+        cache_id = "".join(c for c in cache_id if c not in ",./")
+        filename = os.path.join(self.path, cache_id)
         if os.path.exists(filename):
             os.remove(filename)
 

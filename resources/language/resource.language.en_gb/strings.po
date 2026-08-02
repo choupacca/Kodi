@@ -243,3 +243,40 @@ msgstr ""
 msgctxt "#32211"
 msgid "Done"
 msgstr ""
+
+
+msgctxt "#32005"
+msgid "Movies"
+msgstr ""
+
+msgctxt "#32051"
+msgid "Latest movies"
+msgstr ""
+
+msgctxt "#32052"
+msgid "Popular movies"
+msgstr ""
+
+msgctxt "#32053"
+msgid "Favorite movies"
+msgstr ""
+
+msgctxt "#32054"
+msgid "All movies"
+msgstr ""
+
+msgctxt "#32055"
+msgid "Add to favorite movies"
+msgstr ""
+
+msgctxt "#32056"
+msgid "Remove from favorite movies"
+msgstr ""
+
+msgctxt "#32205"
+msgid "Unable to load the movie catalog"
+msgstr ""
+
+msgctxt "#32206"
+msgid "Unable to play this movie"
+msgstr ""

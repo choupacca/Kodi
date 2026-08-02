@@ -1,3 +1,6 @@
+v1.3.0
+- Added movie catalogs, favorites, watched status, resume-aware playback, and progress syncing.
+
 v1.2.0
 - Fix compatibility with Kodi 21+
 - Replace deprecated xbmc.translatePath() with xbmcvfs.translatePath()

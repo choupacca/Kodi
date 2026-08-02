@@ -115,12 +115,33 @@ class SoapPlayer(xbmc.Player):
         self.end_callback = None
         self.stop_callback = None
         self.ontime_callback = None
+        self.save_final_before_watched = False
+        self.inclusive_watched_threshold = False
 
-    def set_callback(self, play_callback, end_callback=None, stop_callback=None, ontime_callback=None):
+    def set_callback(self, play_callback, end_callback=None, stop_callback=None, ontime_callback=None,
+                     save_final_before_watched=False, inclusive_watched_threshold=False):
         self.play_callback = play_callback
         self.end_callback = end_callback
         self.stop_callback = stop_callback
         self.ontime_callback = ontime_callback
+        self.save_final_before_watched = save_final_before_watched
+        self.inclusive_watched_threshold = inclusive_watched_threshold
+
+    def _finished(self):
+        if not self.watched_time or not self.total_time or self.end_callback is None:
+            return False
+        if self.watched_time <= 0 or self.total_time <= 0:
+            return False
+        progress = self.watched_time / self.total_time
+        return progress >= 0.9 if self.inclusive_watched_threshold else progress > 0.9
+
+    def _finalize(self):
+        finished = self._finished()
+        if self.watched_time and self.stop_callback is not None \
+                and (self.save_final_before_watched or not finished):
+            self.stop_callback(self.watched_time)
+        if finished:
+            self.end_callback()
 
     def onPlayBackStarted(self):
         """Will be called when xbmc starts playing a file."""
@@ -130,24 +151,14 @@ class SoapPlayer(xbmc.Player):
 
     def onPlayBackEnded(self):
         """Will be called when xbmc stops playing a file."""
-        if self.watched_time and self.stop_callback is not None:
-            self.stop_callback(self.watched_time)
-        if self.watched_time and self.total_time and self.end_callback is not None \
-                and self.watched_time > 0 and self.total_time > 0 \
-                and self.watched_time / self.total_time >= 0.9:
-            self.end_callback()
+        self._finalize()
 
         return super(SoapPlayer, self).onPlayBackEnded()
 
     def onPlayBackStopped(self):
         """Will be called when user stops xbmc playing a file."""
 
-        if self.watched_time and self.stop_callback is not None:
-            self.stop_callback(self.watched_time)
-        if self.watched_time and self.total_time and self.end_callback is not None \
-                and self.watched_time > 0 and self.total_time > 0 \
-                and self.watched_time / self.total_time >= 0.9:
-            self.end_callback()
+        self._finalize()
 
         return super(SoapPlayer, self).onPlayBackStopped()
 
@@ -162,6 +173,10 @@ class SoapPlayer(xbmc.Player):
         return super(SoapPlayer, self).onPlayBackResumed()
 
     def is_soap_play(self, url):
+        self.update_time()
+        return not self.is_start or (self.isPlaying() and url in self.getPlayingFile())
+
+    def update_time(self):
         try:
             self.watched_time = self.getTime()
             self.total_time = self.getTotalTime()
@@ -170,13 +185,13 @@ class SoapPlayer(xbmc.Player):
                 self.ontime_callback(self.watched_time)
         except:
             pass
-        return not self.is_start or (self.isPlaying() and url in self.getPlayingFile())
 
 
 class SoapVideo(object):
     SAVE_INTERVAL = 30
 
-    def __init__(self, eid, url, start_from, li, cb_watched, cb_save_pos, resolved=False):
+    def __init__(self, eid, url, start_from, li, cb_watched, cb_save_pos, resolved=False,
+                 periodic_remote_save=False, url_independent_monitor=False):
         self.eid = eid
         self.li = li
         self.url = url
@@ -184,6 +199,8 @@ class SoapVideo(object):
         self.cb_watched = cb_watched
         self.cp_save_pos = cb_save_pos
         self.resolved = resolved
+        self.periodic_remote_save = periodic_remote_save
+        self.url_independent_monitor = url_independent_monitor
         self.last_saved_at = 0
         self.cache = SoapCache(soappath, 15)
 
@@ -274,7 +291,7 @@ class SoapVideo(object):
         def time_cb(pos):
             self.set_pos(pos)
             now = time.time()
-            if pos > 0 and now - self.last_saved_at >= self.SAVE_INTERVAL:
+            if self.periodic_remote_save and pos > 0 and now - self.last_saved_at >= self.SAVE_INTERVAL:
                 self.cp_save_pos(pos)
                 self.last_saved_at = now
 
@@ -282,7 +299,9 @@ class SoapVideo(object):
             play_callback=play_callback,
             end_callback=watched_cb,
             stop_callback=stop_cb,
-            ontime_callback=time_cb
+            ontime_callback=time_cb,
+            save_final_before_watched=self.url_independent_monitor,
+            inclusive_watched_threshold=self.url_independent_monitor
         )
 
         self.li.setProperty('StartOffset', str(pos))
@@ -293,10 +312,22 @@ class SoapVideo(object):
             p.play(self.url, self.li)
 
         self.last_saved_at = time.time()
-        xbmc.sleep(1000)
-
-        while p.is_soap_play(self.url) and not xbmc.Monitor().abortRequested:
+        monitor = xbmc.Monitor()
+        if self.url_independent_monitor:
+            deadline = time.time() + 30
+            while not monitor.abortRequested and time.time() < deadline and not p.isPlaying():
+                xbmc.sleep(250)
+            if not p.isPlaying():
+                xbmc.log('Soap4.me movie playback failed to start within 30 seconds', xbmc.LOGERROR)
+                message_error(l.movie_playback_error)
+                return
+            while not monitor.abortRequested and p.isPlaying():
+                p.update_time()
+                xbmc.sleep(1000)
+        else:
             xbmc.sleep(1000)
+            while p.is_soap_play(self.url) and not monitor.abortRequested:
+                xbmc.sleep(1000)
 
         return
 
@@ -964,8 +995,8 @@ def _movie_text(value):
         for item in value:
             if isinstance(item, str):
                 values.append(item)
-            elif isinstance(item, dict) and isinstance(item.get('title'), str):
-                values.append(item['title'])
+            elif isinstance(item, dict) and isinstance(item.get('name'), str):
+                values.append(item['name'])
         return ', '.join(values)
     return value if isinstance(value, str) else ''
 
@@ -994,10 +1025,11 @@ class SoapMovie(object):
         title = self.title()
         original = _movie_text(self.data.get('title'))
         meta = {
+            'mediatype': 'movie',
             'title': title,
             'originaltitle': original if original != title else '',
             'year': self.data.get('year'),
-            'genre': _movie_text(self.data.get('genres')),
+            'genre': _movie_text(self.data.get('interests') or self.data.get('genres')),
             'country': _movie_text(self.data.get('countries')),
             'duration': self.data.get('runtime'),
             'rating': self.data.get('imdb_rating')
@@ -1006,7 +1038,7 @@ class SoapMovie(object):
         poster = covers.get('big') or icon
         return MenuRow(
             {'page': 'PlayMovie', 'mid': str(self.mid)}, title,
-            _movie_text(self.data.get('description')), img=poster,
+            _movie_text(self.data.get('description_ru')) or _movie_text(self.data.get('description')), img=poster,
             is_folder=False, is_watched=bool(self.data.get('watched')),
             meta=meta, context=self.context()
         )
@@ -1161,7 +1193,8 @@ class SoapApi(object):
             li = xbmcgui.ListItem(movie.title())
             SoapVideo('movie_{0}'.format(mid), data['stream_url'], start_from, li,
                       lambda: self.movie_action(mid, 'watch'),
-                      lambda pos: self.save_movie_position(mid, pos), resolved=True).play()
+                      lambda pos: self.save_movie_position(mid, pos), resolved=True,
+                      periodic_remote_save=True, url_independent_monitor=True).play()
             return True
         except Exception as err:
             xbmc.log('Soap4.me movie API failure (play movie, {0}): {1}'.format(

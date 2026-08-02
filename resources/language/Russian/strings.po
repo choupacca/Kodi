@@ -243,3 +243,40 @@ msgstr "Неверное имя пользователя или пароль"
 msgctxt "#32211"
 msgid "Done"
 msgstr "Выполнено"
+
+
+msgctxt "#32005"
+msgid "Movies"
+msgstr "Фильмы"
+
+msgctxt "#32051"
+msgid "Latest movies"
+msgstr "Новые фильмы"
+
+msgctxt "#32052"
+msgid "Popular movies"
+msgstr "Популярные фильмы"
+
+msgctxt "#32053"
+msgid "Favorite movies"
+msgstr "Избранные фильмы"
+
+msgctxt "#32054"
+msgid "All movies"
+msgstr "Все фильмы"
+
+msgctxt "#32055"
+msgid "Add to favorite movies"
+msgstr "Добавить в избранные фильмы"
+
+msgctxt "#32056"
+msgid "Remove from favorite movies"
+msgstr "Удалить из избранных фильмов"
+
+msgctxt "#32205"
+msgid "Unable to load the movie catalog"
+msgstr "Не удалось загрузить каталог фильмов"
+
+msgctxt "#32206"
+msgid "Unable to play this movie"
+msgstr "Не удалось воспроизвести фильм"

@@ -13,7 +13,7 @@ try:
 except:
     pass
 
-__version__ = '1.2.0'
+__version__ = '1.3.0'
 __settings__ = xbmcaddon.Addon(id='plugin.video.soap4.me')
 
 DEBUG = False
@@ -83,7 +83,11 @@ ACTIONS = (
     'watch',
     'unwatch',
     'mark_watched',
-    'mark_unwatched'
+    'mark_unwatched',
+    'movie_like',
+    'movie_unlike',
+    'movie_watch',
+    'movie_unwatch'
 )
 
 if sys.argv[1] not in ACTIONS:
@@ -111,12 +115,33 @@ class SoapPlayer(xbmc.Player):
         self.end_callback = None
         self.stop_callback = None
         self.ontime_callback = None
+        self.save_final_before_watched = False
+        self.inclusive_watched_threshold = False
 
-    def set_callback(self, play_callback, end_callback=None, stop_callback=None, ontime_callback=None):
+    def set_callback(self, play_callback, end_callback=None, stop_callback=None, ontime_callback=None,
+                     save_final_before_watched=False, inclusive_watched_threshold=False):
         self.play_callback = play_callback
         self.end_callback = end_callback
         self.stop_callback = stop_callback
         self.ontime_callback = ontime_callback
+        self.save_final_before_watched = save_final_before_watched
+        self.inclusive_watched_threshold = inclusive_watched_threshold
+
+    def _finished(self):
+        if not self.watched_time or not self.total_time or self.end_callback is None:
+            return False
+        if self.watched_time <= 0 or self.total_time <= 0:
+            return False
+        progress = self.watched_time / self.total_time
+        return progress >= 0.9 if self.inclusive_watched_threshold else progress > 0.9
+
+    def _finalize(self):
+        finished = self._finished()
+        if self.watched_time and self.stop_callback is not None \
+                and (self.save_final_before_watched or not finished):
+            self.stop_callback(self.watched_time)
+        if finished:
+            self.end_callback()
 
     def onPlayBackStarted(self):
         """Will be called when xbmc starts playing a file."""
@@ -126,24 +151,14 @@ class SoapPlayer(xbmc.Player):
 
     def onPlayBackEnded(self):
         """Will be called when xbmc stops playing a file."""
-        if self.watched_time and self.total_time and self.end_callback is not None \
-                and self.watched_time > 0 and self.total_time > 0 \
-                and self.watched_time / self.total_time > 0.9:
-            self.end_callback()
-        elif self.watched_time:
-            self.stop_callback(self.watched_time)
+        self._finalize()
 
         return super(SoapPlayer, self).onPlayBackEnded()
 
     def onPlayBackStopped(self):
         """Will be called when user stops xbmc playing a file."""
 
-        if self.watched_time and self.total_time and self.end_callback is not None \
-                and self.watched_time > 0 and self.total_time > 0 \
-                and self.watched_time / self.total_time > 0.9:
-            self.end_callback()
-        elif self.watched_time:
-            self.stop_callback(self.watched_time)
+        self._finalize()
 
         return super(SoapPlayer, self).onPlayBackStopped()
 
@@ -158,6 +173,10 @@ class SoapPlayer(xbmc.Player):
         return super(SoapPlayer, self).onPlayBackResumed()
 
     def is_soap_play(self, url):
+        self.update_time()
+        return not self.is_start or (self.isPlaying() and url in self.getPlayingFile())
+
+    def update_time(self):
         try:
             self.watched_time = self.getTime()
             self.total_time = self.getTotalTime()
@@ -166,17 +185,23 @@ class SoapPlayer(xbmc.Player):
                 self.ontime_callback(self.watched_time)
         except:
             pass
-        return not self.is_start or (self.isPlaying() and url in self.getPlayingFile())
 
 
 class SoapVideo(object):
-    def __init__(self, eid, url, start_from, li, cb_watched, cb_save_pos):
+    SAVE_INTERVAL = 30
+
+    def __init__(self, eid, url, start_from, li, cb_watched, cb_save_pos, resolved=False,
+                 periodic_remote_save=False, url_independent_monitor=False):
         self.eid = eid
         self.li = li
         self.url = url
         self.start_from = start_from
         self.cb_watched = cb_watched
         self.cp_save_pos = cb_save_pos
+        self.resolved = resolved
+        self.periodic_remote_save = periodic_remote_save
+        self.url_independent_monitor = url_independent_monitor
+        self.last_saved_at = 0
         self.cache = SoapCache(soappath, 15)
 
     def set_pos(self, position):
@@ -192,7 +217,7 @@ class SoapVideo(object):
             pos = 0
         try:
             pos = max(float(pos), float(self.start_from))
-        except ValueError:
+        except (TypeError, ValueError):
             pos = 0
 
         if pos < 10:
@@ -215,6 +240,13 @@ class SoapVideo(object):
             return
 
         p = SoapPlayer()
+        watched_sent = [False]
+
+        def watched_cb():
+            if not watched_sent[0]:
+                watched_sent[0] = True
+                self.rm_pos()
+                self.cb_watched()
 
         def play_callback(player):
             # 0 - default, 1 - translate, 2 - original
@@ -256,20 +288,46 @@ class SoapVideo(object):
             self.set_pos(pos)
             self.cp_save_pos(pos)
 
+        def time_cb(pos):
+            self.set_pos(pos)
+            now = time.time()
+            if self.periodic_remote_save and pos > 0 and now - self.last_saved_at >= self.SAVE_INTERVAL:
+                self.cp_save_pos(pos)
+                self.last_saved_at = now
+
         p.set_callback(
             play_callback=play_callback,
-            end_callback=self.cb_watched,
+            end_callback=watched_cb,
             stop_callback=stop_cb,
-            ontime_callback=self.set_pos
+            ontime_callback=time_cb,
+            save_final_before_watched=self.url_independent_monitor,
+            inclusive_watched_threshold=self.url_independent_monitor
         )
 
         self.li.setProperty('StartOffset', str(pos))
-        p.play(self.url, self.li)
+        if self.resolved:
+            self.li.setPath(self.url)
+            xbmcplugin.setResolvedUrl(h, True, self.li)
+        else:
+            p.play(self.url, self.li)
 
-        xbmc.sleep(1000)
-
-        while p.is_soap_play(self.url) and not xbmc.Monitor().abortRequested:
+        self.last_saved_at = time.time()
+        monitor = xbmc.Monitor()
+        if self.url_independent_monitor:
+            deadline = time.time() + 30
+            while not monitor.abortRequested and time.time() < deadline and not p.isPlaying():
+                xbmc.sleep(250)
+            if not p.isPlaying():
+                xbmc.log('Soap4.me movie playback failed to start within 30 seconds', xbmc.LOGERROR)
+                message_error(l.movie_playback_error)
+                return
+            while not monitor.abortRequested and p.isPlaying():
+                p.update_time()
+                xbmc.sleep(1000)
+        else:
             xbmc.sleep(1000)
+            while p.is_soap_play(self.url) and not monitor.abortRequested:
+                xbmc.sleep(1000)
 
         return
 
@@ -382,7 +440,8 @@ class SoapHttpClient(SoapCookies):
         return urllib.parse.urlencode(params).encode('utf-8')
 
     def _request(self, url, params=None):
-        xbmc.log('REQUEST: {0} {1} {2}'.format(url, params, sys.argv[1]))
+        # Never log request bodies: authentication and action bodies may contain secrets.
+        xbmc.log('Soap4.me request: {0} {1}'.format('POST' if params is not None else 'GET', url))
         self._cookies_init()
 
         req = urllib.request.Request(self.HOST + url)
@@ -671,6 +730,9 @@ class MenuRow(object):
         if self.context:
             li.addContextMenuItems(self.context)
 
+        if not self.is_folder:
+            li.setProperty('IsPlayable', 'true')
+
 
         return h, parts.uri(self.link), li, bool(self.is_folder)
 
@@ -926,6 +988,62 @@ class SoapEpisodes(object):
         return not all(ep.is_watched() for ep in list(self.episodes[season].values()))
 
 
+def _movie_text(value):
+    """Turn the API's string/list metadata into a safe Kodi label."""
+    if isinstance(value, (list, tuple)):
+        values = []
+        for item in value:
+            if isinstance(item, str):
+                values.append(item)
+            elif isinstance(item, dict) and isinstance(item.get('name'), str):
+                values.append(item['name'])
+        return ', '.join(values)
+    return value if isinstance(value, str) else ''
+
+
+class SoapMovie(object):
+    def __init__(self, data):
+        if not isinstance(data, dict):
+            raise ValueError('movie is not an object')
+        self.data = data
+        self.mid = int(data['id'])
+
+    def title(self):
+        return _movie_text(self.data.get('title_ru')) or _movie_text(self.data.get('title')) or str(self.mid)
+
+    def context(self):
+        favorite_action = 'movie_unlike' if self.data.get('liked') else 'movie_like'
+        favorite_label = l.remove_from_favorite_movies if self.data.get('liked') else l.add_to_favorite_movies
+        watched_action = 'movie_unwatch' if self.data.get('watched') else 'movie_watch'
+        watched_label = l.mark_as_unwatched if self.data.get('watched') else l.mark_as_watched
+        return [
+            (favorite_label, 'RunScript(plugin.video.soap4.me, {0}, {1})'.format(favorite_action, self.mid)),
+            (watched_label, 'RunScript(plugin.video.soap4.me, {0}, {1})'.format(watched_action, self.mid))
+        ]
+
+    def menu(self):
+        title = self.title()
+        original = _movie_text(self.data.get('title'))
+        meta = {
+            'mediatype': 'movie',
+            'title': title,
+            'originaltitle': original if original != title else '',
+            'year': self.data.get('year'),
+            'genre': _movie_text(self.data.get('interests') or self.data.get('genres')),
+            'country': _movie_text(self.data.get('countries')),
+            'duration': self.data.get('runtime'),
+            'rating': self.data.get('imdb_rating')
+        }
+        covers = self.data.get('covers') if isinstance(self.data.get('covers'), dict) else {}
+        poster = covers.get('big') or icon
+        return MenuRow(
+            {'page': 'PlayMovie', 'mid': str(self.mid)}, title,
+            _movie_text(self.data.get('description_ru')) or _movie_text(self.data.get('description')), img=poster,
+            is_folder=False, is_watched=bool(self.data.get('watched')),
+            meta=meta, context=self.context()
+        )
+
+
 class SoapApi(object):
     EPISODES_URL = '/episodes/{0}/'
 
@@ -940,6 +1058,14 @@ class SoapApi(object):
 
     PLAY_EPISODES_URL = '/play/episode/{eid}/'
     SAVE_POSITION_URL = '/play/episode/{eid}/savets/'
+
+    MOVIES_URL = '/movies/'
+    POPULAR_MOVIES_URL = '/movies/popular/'
+    MOVIE_DESCRIPTION_URL = '/movies/description/{mid}/'
+    MOVIE_LIKE_URL = '/movies/like/{mid}/'
+    MOVIE_WATCH_URL = '/movies/watch/{mid}/'
+    MOVIE_UNWATCH_URL = '/movies/unwatch/{mid}/'
+    MOVIE_SAVE_POSITION_URL = '/movies/savets/{mid}/'
 
     MARKER_URL = {
         'watch': '/soap/watch/{sid}/',
@@ -985,7 +1111,97 @@ class SoapApi(object):
             MenuRow({'page': 'All', 'param': 'my'}, l.all_shows, is_folder=True),
             MenuRow({'page': 'Continue', 'param': 'my'}, l.unfinished, is_folder=True),
             MenuRow({'page': 'AliveForMe', 'param': 'my'}, l.recommended, is_folder=True),
+            MenuRow({'page': 'Movies'}, l.movies, is_folder=True),
         ]
+
+    def movies_menu(self):
+        return [
+            MenuRow({'page': 'MovieList', 'param': 'latest'}, l.latest_movies, is_folder=True),
+            MenuRow({'page': 'MovieList', 'param': 'popular'}, l.popular_movies, is_folder=True),
+            MenuRow({'page': 'MovieList', 'param': 'favorite'}, l.favorite_movies, is_folder=True),
+            MenuRow({'page': 'MovieList', 'param': 'all'}, l.all_movies, is_folder=True)
+        ]
+
+    def _movie_request(self, operation, url, params=None, use_cache=False):
+        try:
+            return self.client.request(url, params, use_cache=use_cache)
+        except Exception as err:
+            xbmc.log('Soap4.me movie API failure ({0}, {1}): {2}'.format(operation, url, err), xbmc.LOGERROR)
+            raise
+
+    def get_movies(self, kind):
+        url = self.POPULAR_MOVIES_URL if kind == 'popular' else self.MOVIES_URL
+        try:
+            data = self._movie_request('load catalog', url, use_cache=True)
+            if not isinstance(data, list):
+                raise SoapException('catalog response is not a list')
+        except Exception as err:
+            xbmc.log('Soap4.me movie API failure (validate catalog, {0}): {1}'.format(url, err), xbmc.LOGERROR)
+            message_error(l.movie_catalog_error)
+            return []
+
+        movies = []
+        for row in data:
+            try:
+                movie = SoapMovie(row)
+                if kind != 'favorite' or row.get('liked'):
+                    movies.append(movie)
+            except Exception as err:
+                xbmc.log('Soap4.me movie catalog: skipped malformed item: {0}'.format(err), xbmc.LOGWARNING)
+
+        if kind == 'latest':
+            movies.sort(key=lambda movie: movie.mid, reverse=True)
+        elif kind == 'all':
+            movies.sort(key=lambda movie: movie.title().casefold())
+        return [movie.menu() for movie in movies]
+
+    def movie_action(self, mid, action):
+        urls = {
+            'like': (self.MOVIE_LIKE_URL, {'do': 'like'}),
+            'unlike': (self.MOVIE_LIKE_URL, {'do': 'unlike'}),
+            'watch': (self.MOVIE_WATCH_URL, {}),
+            'unwatch': (self.MOVIE_UNWATCH_URL, {})
+        }
+        url, params = urls[action]
+        try:
+            data = self._movie_request(action, url.format(mid=mid), params)
+            self.client.clean(self.MOVIES_URL)
+            self.client.clean(self.POPULAR_MOVIES_URL)
+            return isinstance(data, dict) and data.get('ok', 0) == 1
+        except Exception:
+            return False
+
+    def save_movie_position(self, mid, position):
+        try:
+            data = self._movie_request('save position', self.MOVIE_SAVE_POSITION_URL.format(mid=mid),
+                                       {'time': int(position)})
+            return isinstance(data, dict) and data.get('ok', 0) == 1
+        except Exception:
+            return False
+
+    def play_movie(self, mid):
+        try:
+            data = self._movie_request('load description', self.MOVIE_DESCRIPTION_URL.format(mid=mid))
+            if not isinstance(data, dict) or not isinstance(data.get('stream_url'), str) or not data['stream_url']:
+                raise SoapException('stream_url is missing')
+            try:
+                start_from = float(data.get('start_from') or 0)
+                start_from = max(0, start_from)
+            except (TypeError, ValueError):
+                start_from = 0
+            movie = SoapMovie(dict(data, id=mid))
+            li = xbmcgui.ListItem(movie.title())
+            SoapVideo('movie_{0}'.format(mid), data['stream_url'], start_from, li,
+                      lambda: self.movie_action(mid, 'watch'),
+                      lambda pos: self.save_movie_position(mid, pos), resolved=True,
+                      periodic_remote_save=True, url_independent_monitor=True).play()
+            return True
+        except Exception as err:
+            xbmc.log('Soap4.me movie API failure (play movie, {0}): {1}'.format(
+                self.MOVIE_DESCRIPTION_URL.format(mid=mid), err), xbmc.LOGERROR)
+            message_error(l.movie_playback_error)
+            xbmcplugin.setResolvedUrl(h, False, xbmcgui.ListItem())
+            return False
 
     def my_menu(self):
         return [
@@ -1186,6 +1402,13 @@ class SoapApi(object):
             return self.get_last_episodes('all')
         elif parts.page == 'Continue':
             return self.get_continue_episodes()
+        elif parts.page == 'Movies':
+            return self.movies_menu()
+        elif parts.page == 'MovieList':
+            return self.get_movies(parts.param)
+        elif parts.page == 'PlayMovie':
+            self.play_movie(to_int(parts.mid))
+            return None
 
         elif parts.page == 'Serial':
             return self.get_serials(parts.sid)
@@ -1239,7 +1462,7 @@ def kodi_draw_list(parts, rows):
     xbmcplugin.endOfDirectory(h)
 
 class KodiUrl(object):
-    __slots__ = ('page', 'param', 'sid', 'season', 'epnum', 'eid')
+    __slots__ = ('page', 'param', 'sid', 'season', 'epnum', 'eid', 'mid')
 
     def __init__(self, params):
         for key in self.__slots__:
@@ -1373,6 +1596,14 @@ if sys.argv[1] == 'mark_watched' or sys.argv[1] == 'mark_unwatched':
         #message_error(l.error_msg.format(msg))
         message_error(l.error)
 
+    exit(0)
+
+if sys.argv[1] in ('movie_like', 'movie_unlike', 'movie_watch', 'movie_unwatch'):
+    api = SoapApi()
+    action = sys.argv[1][len('movie_'):]
+    result = api.is_auth and api.movie_action(to_int(sys.argv[2]), action)
+    xbmc.executebuiltin('Container.Refresh')
+    message_ok(l.done) if result else message_error(l.error)
     exit(0)
 
 

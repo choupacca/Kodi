@@ -5,6 +5,7 @@
 import xbmc, xbmcgui, xbmcplugin, xbmcaddon, xbmcvfs
 import urllib.request, urllib.parse, urllib.error, os, sys
 import datetime as dt
+import re
 import resources.lib.localization as l
 
 try:
@@ -991,14 +992,80 @@ class SoapEpisodes(object):
 def _movie_text(value):
     """Turn the API's string/list metadata into a safe Kodi label."""
     if isinstance(value, (list, tuple)):
-        values = []
-        for item in value:
-            if isinstance(item, str):
-                values.append(item)
-            elif isinstance(item, dict) and isinstance(item.get('name'), str):
-                values.append(item['name'])
-        return ', '.join(values)
+        return ', '.join(_movie_names(value))
+    if isinstance(value, dict):
+        return value.get('name') if isinstance(value.get('name'), str) else ''
     return value if isinstance(value, str) else ''
+
+
+def _movie_names(value):
+    """Return Soap4me person/genre objects as a clean list of names."""
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(',') if item.strip()]
+    if isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return []
+
+    names = []
+    for item in value:
+        if isinstance(item, str):
+            name = item.strip()
+        elif isinstance(item, dict) and isinstance(item.get('name'), str):
+            name = item['name'].strip()
+        else:
+            name = ''
+        if name:
+            names.append(name)
+    return names
+
+
+def _movie_runtime_seconds(value):
+    """Convert Soap4me runtime values such as ``2ч 10м`` to seconds."""
+    if isinstance(value, bool) or value is None:
+        return 0
+    if isinstance(value, (int, float)):
+        return max(0, int(value))
+    if not isinstance(value, str):
+        return 0
+
+    runtime = value.strip().lower()
+    if not runtime:
+        return 0
+    if runtime.isdigit():
+        return int(runtime)
+
+    hours = re.search(r'(\d+(?:[.,]\d+)?)\s*(?:ч(?:ас(?:а|ов)?)?\.?|h(?:ours?)?)', runtime)
+    minutes = re.search(r'(\d+(?:[.,]\d+)?)\s*(?:м(?:ин(?:ут(?:а|ы)?)?)?\.?|min(?:ute)?s?)', runtime)
+    if hours or minutes:
+        hour_value = float(hours.group(1).replace(',', '.')) if hours else 0
+        minute_value = float(minutes.group(1).replace(',', '.')) if minutes else 0
+        return max(0, int(hour_value * 3600 + minute_value * 60))
+
+    colon_parts = runtime.split(':')
+    if len(colon_parts) in (2, 3) and all(part.isdigit() for part in colon_parts):
+        values = [int(part) for part in colon_parts]
+        if len(values) == 2:
+            values.insert(0, 0)
+        hours_value, minutes_value, seconds_value = values
+        return max(0, hours_value * 3600 + minutes_value * 60 + seconds_value)
+
+    return 0
+
+
+def _movie_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _movie_rating(value):
+    try:
+        rating = float(value.replace(',', '.')) if isinstance(value, str) else float(value)
+        return rating if rating > 0 else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 class SoapMovie(object):
@@ -1010,6 +1077,45 @@ class SoapMovie(object):
 
     def title(self):
         return _movie_text(self.data.get('title_ru')) or _movie_text(self.data.get('title')) or str(self.mid)
+
+    def plot(self):
+        return _movie_text(self.data.get('description_ru')) or _movie_text(self.data.get('description'))
+
+    def poster(self):
+        covers = self.data.get('covers') if isinstance(self.data.get('covers'), dict) else {}
+        return covers.get('big') or icon
+
+    def metadata(self):
+        title = self.title()
+        original = _movie_text(self.data.get('title'))
+        metadata = {
+            'mediatype': 'movie',
+            'title': title,
+            'plot': self.plot(),
+            'genre': _movie_text(self.data.get('interests') or self.data.get('genres')),
+            'country': _movie_text(self.data.get('countries'))
+        }
+
+        optional = {
+            'originaltitle': original if original != title else '',
+            'year': _movie_int(self.data.get('year')),
+            'duration': _movie_runtime_seconds(self.data.get('runtime')),
+            'rating': _movie_rating(self.data.get('imdb_rating')),
+            'cast': _movie_names(self.data.get('actors')),
+            'director': _movie_text(self.data.get('directors')),
+            'writer': _movie_text(self.data.get('writers')),
+            'set': _movie_text(self.data.get('franchise'))
+        }
+        metadata.update((key, value) for key, value in optional.items() if value not in (None, '', [], 0))
+        return metadata
+
+    def playback_item(self):
+        poster = self.poster()
+        li = xbmcgui.ListItem(label=self.title())
+        li.setArt({'icon': str(poster), 'thumb': str(poster), 'poster': str(poster)})
+        li.setInfo(type='video', infoLabels=self.metadata())
+        li.setProperty('IsPlayable', 'true')
+        return li
 
     def context(self):
         favorite_action = 'movie_unlike' if self.data.get('liked') else 'movie_like'
@@ -1023,24 +1129,11 @@ class SoapMovie(object):
 
     def menu(self):
         title = self.title()
-        original = _movie_text(self.data.get('title'))
-        meta = {
-            'mediatype': 'movie',
-            'title': title,
-            'originaltitle': original if original != title else '',
-            'year': self.data.get('year'),
-            'genre': _movie_text(self.data.get('interests') or self.data.get('genres')),
-            'country': _movie_text(self.data.get('countries')),
-            'duration': self.data.get('runtime'),
-            'rating': self.data.get('imdb_rating')
-        }
-        covers = self.data.get('covers') if isinstance(self.data.get('covers'), dict) else {}
-        poster = covers.get('big') or icon
         return MenuRow(
             {'page': 'PlayMovie', 'mid': str(self.mid)}, title,
-            _movie_text(self.data.get('description_ru')) or _movie_text(self.data.get('description')), img=poster,
+            self.plot(), img=self.poster(),
             is_folder=False, is_watched=bool(self.data.get('watched')),
-            meta=meta, context=self.context()
+            meta=self.metadata(), context=self.context()
         )
 
 
@@ -1190,7 +1283,7 @@ class SoapApi(object):
             except (TypeError, ValueError):
                 start_from = 0
             movie = SoapMovie(dict(data, id=mid))
-            li = xbmcgui.ListItem(movie.title())
+            li = movie.playback_item()
             SoapVideo('movie_{0}'.format(mid), data['stream_url'], start_from, li,
                       lambda: self.movie_action(mid, 'watch'),
                       lambda pos: self.save_movie_position(mid, pos), resolved=True,
